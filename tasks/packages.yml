@@ -229,7 +229,6 @@
   ansible.builtin.apt:
     autoclean: true
     autoremove: true
-    clean: true
   when: ansible_os_family == "Debian"
   tags:
     - packages
