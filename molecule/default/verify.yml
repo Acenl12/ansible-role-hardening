@@ -4,16 +4,20 @@
   any_errors_fatal: true
 
   tasks:
-    - name: Reboot host
-      become: true
-      ansible.builtin.reboot:
+    - name: Reboot and reconnect
+      when:
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
+      block:
+        - name: Reboot host
+          become: true
+          ansible.builtin.reboot:
 
-    - name: Wait for the host and reconnect
-      ansible.builtin.wait_for:
-        port: 22
-        host: "{{ (ansible_ssh_host | default(ansible_host)) | default(inventory_hostname) }}"
-        delay: 10
-        timeout: 120
+        - name: Wait for the host and reconnect
+          ansible.builtin.wait_for:
+            port: 22
+            host: "{{ (ansible_ssh_host | default(ansible_host)) | default(inventory_hostname) }}"
+            delay: 10
+            timeout: 120
 
     - name: Include default vars
       ansible.builtin.include_vars:
@@ -57,8 +61,9 @@
         shell: /bin/bash
         create_home: true
         generate_ssh_key: true
-        ssh_key_bits: 3072
+        ssh_key_bits: "{{ sshd_required_rsa_size }}"
         ssh_key_file: .ssh/id_rsa
+        ssh_key_type: rsa
       loop:
         - testuser01
         - testuser02
@@ -121,7 +126,24 @@
       register: snapd_running
       changed_when: false
       failed_when: snapd_running.rc != 0
-      when: ansible_distribution == "Ubuntu"
+      when:
+        - ansible_distribution == "Ubuntu"
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
+
+    - name: Verify rsyslog FileCreateMode
+      become: true
+      environment:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      ansible.builtin.shell: |
+        set -o pipefail
+        rsyslogd -N3 -d 2>&1 | grep -o '\$FileCreateMode.*' | awk '{ if ($NF!="{{ rsyslog_filecreatemode }}") exit 1}'
+      args:
+        executable: /bin/bash
+      register: rsyslog_filecreate
+      changed_when: false
+      failed_when: rsyslog_filecreate.rc != 0
+      when:
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
 
     - name: Verify auditd configuration
       become: true
@@ -255,7 +277,8 @@
         sshd_config_parameters:
           - "{{ 'AcceptEnv ' + sshd_accept_env if (sshd_accept_env is defined and sshd_accept_env | length != 0)}}"
           - AddressFamily {{ 'inet' if (disable_ipv6 | bool) else 'any' }}
-          - AllowGroups vagrant sudo
+          - AllowGroups {{ sshd_allow_groups | join(' ') }}
+          - AllowUsers {{ sshd_allow_users | join(' ') }}
           - AllowAgentForwarding {{ 'yes' if (sshd_allow_agent_forwarding | bool) else 'no' }}
           - >-
             {%- if (ssh_installed_version is version('6.2', '>=')) -%}
@@ -403,7 +426,8 @@
       become: true
       environment:
         PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      ansible.builtin.command: sshd -T
+      ansible.builtin.command:
+        cmd: sshd -T
       check_mode: false
       register: sshd_config
       changed_when: false
@@ -439,6 +463,8 @@
       register: sysctl_file_config
       failed_when: sysctl_file_config.rc != 0
       changed_when: sysctl_file_config.rc != 0
+      when:
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
 
     - name: Verify sysctl runtime configuration
       become: true
@@ -451,6 +477,8 @@
       register: sysctl_runtime_config
       failed_when: sysctl_runtime_config.rc != 0
       changed_when: sysctl_runtime_config.rc != 0
+      when:
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
 
     - name: Get crypto-policies value
       environment:
@@ -461,38 +489,42 @@
       failed_when: crypto_policy_set.rc != 0
       changed_when: crypto_policy_set.rc != 0
 
-    - name: Verify noexec /dev/shm
-      ansible.builtin.shell: grep '^tmpfs\s/dev/shm.*noexec' /proc/mounts
-      register: dev_shm_noexec
-      failed_when: dev_shm_noexec.rc != 0
-      changed_when: dev_shm_noexec.rc != 0
+    - name: Verify mounts
+      when:
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
+      block:
+        - name: Verify noexec /dev/shm
+          ansible.builtin.shell: grep '^tmpfs\s/dev/shm.*noexec' /proc/mounts
+          register: dev_shm_noexec
+          failed_when: dev_shm_noexec.rc != 0
+          changed_when: dev_shm_noexec.rc != 0
 
-    - name: Verify /proc
-      ansible.builtin.shell: |
-        set -o pipefail
-        grep -E '^proc\s/proc proc rw,nosuid,nodev,noexec,relatime.*hidepid=({{ hide_pid }}|invisible)' /proc/mounts
-      args:
-        executable: /bin/bash
-      register: proc_opts
-      failed_when: proc_opts.rc != 0
-      changed_when: proc_opts.rc != 0
-      tags:
-        - skip_ansible_lint
+        - name: Verify /proc
+          ansible.builtin.shell: |
+            set -o pipefail
+            grep -E '^proc\s/proc proc rw,nosuid,nodev,noexec,relatime.*hidepid=({{ hide_pid }}|invisible)' /proc/mounts
+          args:
+            executable: /bin/bash
+          register: proc_opts
+          failed_when: proc_opts.rc != 0
+          changed_when: proc_opts.rc != 0
+          tags:
+            - skip_ansible_lint
 
-    - name: Verify tmp.mount
-      become: true
-      ansible.builtin.systemd:
-        name: tmp.mount
-      register: tmp_mount
-      failed_when: not 'nosuid,nodev,noexec' in tmp_mount.status.Options
-      changed_when: not 'nosuid,nodev,noexec' in tmp_mount.status.Options
+        - name: Verify tmp.mount
+          become: true
+          ansible.builtin.systemd:
+            name: tmp.mount
+          register: tmp_mount
+          failed_when: not 'nosuid,nodev,noexec' in tmp_mount.status.Options
+          changed_when: not 'nosuid,nodev,noexec' in tmp_mount.status.Options
 
-    - name: Verify /tmp
-      become: true
-      ansible.builtin.shell: grep '^tmpfs\s/tmp\s.*nosuid,nodev,noexec' /proc/mounts
-      register: mounts_tmp
-      failed_when: mounts_tmp.rc != 0
-      changed_when: mounts_tmp.rc != 0
+        - name: Verify /tmp
+          become: true
+          ansible.builtin.shell: grep '^tmpfs\s/tmp\s.*nosuid,nodev,noexec' /proc/mounts
+          register: mounts_tmp
+          failed_when: mounts_tmp.rc != 0
+          changed_when: mounts_tmp.rc != 0
 
     - name: Get PAM version
       tags:
@@ -592,69 +624,75 @@
       failed_when: verify_pwquality is changed
       loop: "{{ pwquality_parameters | select() }}"
 
-    - name: Verify RedHat GRUB audit settings
+    - name: Verify GRUB settings
       become: true
-      ansible.builtin.shell: |
-        set -o pipefail
-        grubby --info="/boot/vmlinuz-$(uname -r)" | grep "^args.*{{ grub_audit_cmdline }} {{ grub_audit_backlog_cmdline }}"
-      register: audit_grubenv
-      failed_when: audit_grubenv.rc != 0
-      changed_when: audit_grubenv.rc != 0
-      when: ansible_os_family == "RedHat"
+      when:
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
+      block:
+        - name: Verify RedHat GRUB audit settings
+          ansible.builtin.shell: |
+            set -o pipefail
+            grubby --info="/boot/vmlinuz-$(uname -r)" | grep "^args.*{{ grub_audit_cmdline }} {{ grub_audit_backlog_cmdline }}"
+          register: audit_grubenv
+          failed_when: audit_grubenv.rc != 0
+          changed_when: audit_grubenv.rc != 0
+          when: ansible_os_family == "RedHat"
 
-    - name: Verify Debian audit GRUB settings
-      become: true
-      ansible.builtin.shell: grep "linux.*{{ grub_audit_cmdline }} {{ grub_audit_backlog_cmdline }}" /boot/grub/grub.cfg
-      register: audit_grub_cfg
-      failed_when: audit_grub_cfg.rc != 0
-      changed_when: audit_grub_cfg.rc != 0
-      when: ansible_os_family == "Debian"
+        - name: Verify Debian audit GRUB settings
+          ansible.builtin.shell: grep "linux.*{{ grub_audit_cmdline }} {{ grub_audit_backlog_cmdline }}" /boot/grub/grub.cfg
+          register: audit_grub_cfg
+          failed_when: audit_grub_cfg.rc != 0
+          changed_when: audit_grub_cfg.rc != 0
+          when: ansible_os_family == "Debian"
 
-    - name: Verify RedHat GRUB IPv6 settings
-      become: true
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          grubby --info="/boot/vmlinuz-$(uname -r)" | grep "ipv6.disable=1"
-      register: audit_grubenv
-      failed_when: audit_grubenv.rc != 0
-      changed_when: audit_grubenv.rc != 0
-      when: ansible_os_family == "RedHat" and disable_ipv6
+        - name: Verify RedHat GRUB IPv6 settings
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              grubby --info="/boot/vmlinuz-$(uname -r)" | grep "ipv6.disable=1"
+          register: audit_grubenv
+          failed_when: audit_grubenv.rc != 0
+          changed_when: audit_grubenv.rc != 0
+          when: ansible_os_family == "RedHat" and disable_ipv6
 
-    - name: Verify Debian GRUB IPv6 settings
-      become: true
-      ansible.builtin.shell:
-        cmd: grep "linux.*ipv6.disable=1" /boot/grub/grub.cfg
-      register: audit_grub_cfg
-      failed_when: audit_grub_cfg.rc != 0
-      changed_when: audit_grub_cfg.rc != 0
-      when: ansible_os_family == "Debian" and disable_ipv6
+        - name: Verify Debian GRUB IPv6 settings
+          ansible.builtin.shell:
+            cmd: grep "linux.*ipv6.disable=1" /boot/grub/grub.cfg
+          register: audit_grub_cfg
+          failed_when: audit_grub_cfg.rc != 0
+          changed_when: audit_grub_cfg.rc != 0
+          when: ansible_os_family == "Debian" and disable_ipv6
 
-    - name: Verify IPv6 sysctl configuration
+    - name: IPv6 sysctl configuration
       become: true
-      ansible.builtin.shell: grep -R "^{{ item }}$" "{{ sysctl_conf_dir }}/"
-      register: sysctl_ipv6_config
-      failed_when: sysctl_ipv6_config.rc != 0
-      changed_when: sysctl_ipv6_config.rc != 0
-      with_items:
-        - net.ipv6.conf.all.disable_ipv6 = 1
-        - net.ipv6.conf.default.disable_ipv6 = 1
-      when: disable_ipv6
+      when:
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
+      block:
+        - name: Verify IPv6 sysctl configuration
+          ansible.builtin.shell: grep -R "^{{ item }}$" "{{ sysctl_conf_dir }}/"
+          register: sysctl_ipv6_config
+          failed_when: sysctl_ipv6_config.rc != 0
+          changed_when: sysctl_ipv6_config.rc != 0
+          with_items:
+            - net.ipv6.conf.all.disable_ipv6 = 1
+            - net.ipv6.conf.default.disable_ipv6 = 1
+          when: disable_ipv6
 
-    - name: Verify IPv6 sysctl runtime configuration
-      environment:
-        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      become: true
-      ansible.builtin.shell: |
-        set -o pipefail
-        sysctl -a | grep "^{{ item.key }}.*{{ item.value | int }}$"
-      args:
-        executable: /bin/bash
-      with_dict: "{{ ipv6_disable_sysctl_settings }}"
-      register: sysctl_ipv6
-      changed_when: sysctl_ipv6.rc != 0
-      failed_when: sysctl_ipv6.rc != 0
-      when: system_has_ipv6 and disable_ipv6
+        - name: Verify IPv6 sysctl runtime configuration
+          environment:
+            PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          ansible.builtin.shell: |
+            set -o pipefail
+            sysctl -a | grep "^{{ item.key }}.*{{ item.value | int }}$"
+          args:
+            executable: /bin/bash
+          with_dict: "{{ ipv6_disable_sysctl_settings }}"
+          register: sysctl_ipv6
+          changed_when: sysctl_ipv6.rc != 0
+          failed_when: sysctl_ipv6.rc != 0
+          when:
+            - system_has_ipv6
+            - disable_ipv6
 
     - name: Find GRUB config files
       become: true
@@ -686,6 +724,8 @@
         - FallbackDNS={{ fallback_dns }}
         - DNSSEC={{ dnssec }}
         - DNSOverTLS={{ dns_over_tls }}
+      when:
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
 
     - name: Verify systemd timesyncd.conf
       become: true
@@ -696,7 +736,9 @@
       with_items:
         - NTP={{ ntp }}
         - FallbackNTP={{ fallback_ntp }}
-      when: enable_timesyncd
+      when:
+        - enable_timesyncd
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
 
     - name: Stat /etc/default/motd-news
       ansible.builtin.stat:
@@ -713,7 +755,10 @@
       check_mode: true
       register: motdnews_service
       failed_when: motdnews_service is changed
-      when: ansible_os_family == "Debian" and motd_news.stat.exists
+      when:
+        - ansible_os_family == "Debian"
+        - motd_news.stat.exists
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
 
     - name: Stat /usr/bin/pro
       ansible.builtin.stat:
@@ -731,7 +776,9 @@
       register: ubuntu_advantage_pro_state
       changed_when: false
       failed_when: ubuntu_advantage_pro_state.rc != 0
-      when: ansible_os_family == "Debian" and ubuntu_advantage_pro.stat.exists
+      when:
+        - ansible_os_family == "Debian"
+        - ubuntu_advantage_pro.stat.exists
 
     - name: Stat apt ESM hook
       ansible.builtin.stat:
@@ -757,6 +804,20 @@
       changed_when: cracklib_passwords.rc != 0
       when: ansible_os_family == "Debian"
 
+    - name: Verify username password list
+      environment:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep "{{ ansible_user | default(lookup('ansible.builtin.env', 'USER')) }}" /usr/share/dict/passwords.local
+      args:
+        executable: /bin/bash
+      register: username_passwords
+      failed_when: username_passwords.rc != 0
+      changed_when: username_passwords.rc != 0
+      when:
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
+
     - name: Index blacklisted kernel modules
       environment:
         PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -768,14 +829,15 @@
       changed_when: false
       failed_when: modprobe_blacklist.rc != 0
       register: modprobe_blacklist
-      when: block_blacklisted | bool
+      when:
+        - block_blacklisted | bool
 
     - name: Verify blocked blacklisted kernel modules
       environment:
         PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       ansible.builtin.shell: |
         set -o pipefail
-        grep 'install {{ item }} /bin/true' /etc/modprobe.d/blockblacklisted.conf
+        grep 'install {{ item }} /bin/true' /etc/modprobe.d/blacklist-blocked.conf
       args:
         executable: /bin/bash
       register: modprobe_blockblacklisted
@@ -783,7 +845,8 @@
       changed_when: modprobe_blockblacklisted.rc != 0
       with_items:
         - "{{ modprobe_blacklist.stdout_lines | sort }}"
-      when: block_blacklisted | bool
+      when:
+        - block_blacklisted | bool
 
     - name: Verify sudo settings
       ansible.builtin.shell: |
@@ -875,11 +938,14 @@
     - name: Verify wireless state
       environment:
         PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      ansible.builtin.command: nmcli -t radio
+      ansible.builtin.command:
+        cmd: nmcli -t radio
       register: wireless_state
       changed_when: not 'disabled' in wireless_state.stdout
       failed_when: not 'disabled' in wireless_state.stdout
-      when: disable_wireless
+      when:
+        - disable_wireless
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
 
     - name: Stat firewall rules when UFW is enabled
       become: true
@@ -891,7 +957,9 @@
       failed_when: ufw_not_managed.rc > 1
       changed_when: false
       register: ufw_not_managed
-      when: ufw_enable
+      when:
+        - ufw_enable
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
 
     - name: Stat firewall rules when UFW is disabled
       become: true
@@ -903,7 +971,9 @@
       failed_when: ufw_not_managed.rc > 1
       changed_when: false
       register: ufw_not_managed
-      when: not ufw_enable
+      when:
+        - not ufw_enable
+        - ansible_virtualization_type not in ["container", "docker", "podman"]
 
     - name: Verify aide configuration
       become: true
@@ -911,7 +981,8 @@
       block:
         - name: Aide config check
           become: true
-          ansible.builtin.command: aide --config-check --config="{{ '/etc/aide/aide.conf' if ansible_os_family == 'Debian' else '/etc/aide.conf' }}"
+          ansible.builtin.command:
+            cmd: aide --config-check --config="{{ '/etc/aide/aide.conf' if ansible_os_family == 'Debian' else '/etc/aide.conf' }}"
           register: aide_config
           changed_when: false
           failed_when: aide_config.rc != 0
@@ -1005,3 +1076,22 @@
     - name: Print test user
       ansible.builtin.debug:
         msg: "{{ roletestuser_pass.stdout }}"
+
+    - name: Stat ssh moduli
+      ansible.builtin.stat:
+        path: /etc/ssh/moduli
+      register: ssh_moduli
+
+    - name: Print ssh moduli checksum
+      ansible.builtin.debug:
+        msg: "{{ ssh_moduli.stat.checksum }}"
+
+    - name: Verify TMOUT setting
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep "^declare -irx TMOUT={{ session_timeout }}$" /etc/profile
+      args:
+        executable: /bin/bash
+      register: declare_tmout
+      changed_when: false
+      failed_when: declare_tmout.rc != 0

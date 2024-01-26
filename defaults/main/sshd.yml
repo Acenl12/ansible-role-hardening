@@ -85,7 +85,8 @@ sshd_print_last_log: true
 sshd_print_motd: false
 sshd_print_pam_motd: false
 sshd_rekey_limit: 512M 1h
-sshd_required_rsa_size: 2048
+sshd_required_ecdsa_size: 521
+sshd_required_rsa_size: 4096
 sshd_sftp_enabled: true
 sshd_sftp_only_chroot: true
 sshd_sftp_only_chroot_dir: "%h"
@@ -94,6 +95,7 @@ sshd_sftp_subsystem: internal-sftp -f LOCAL6 -l INFO
 sshd_strict_modes: true
 sshd_syslog_facility: AUTH
 sshd_tcp_keep_alive: false
+sshd_update_moduli: false
 sshd_use_dns: false
 sshd_use_pam: true
 sshd_use_privilege_separation: sandbox

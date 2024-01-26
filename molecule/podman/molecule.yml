@@ -3,9 +3,7 @@ dependency:
   name: galaxy
   enabled: true
 driver:
-  name: vagrant
-  provider:
-    name: virtualbox
+  name: podman
 provisioner:
   name: ansible
   config_options:
@@ -17,54 +15,66 @@ provisioner:
   log: true
   inventory:
     host_vars:
-      bookworm:
-        ansible_python_interpreter: /usr/bin/python3
+      almalinux9:
+        enable_timesyncd: false
         sshd_admin_net:
           - "0.0.0.0/0"
         sshd_allow_groups:
           - vagrant
           - sudo
-        suid_sgid_permissions: false
-        system_upgrade: false
-      bullseye:
-        ansible_become_pass: vagrant
-        ansible_python_interpreter: /usr/bin/python3
-        sshd_admin_net:
-          - "0.0.0.0/0"
-        sshd_allow_groups:
-          - vagrant
-          - sudo
-        suid_sgid_permissions: false
-      testing:
-        ansible_become_pass: vagrant
-        ansible_python_interpreter: /usr/bin/python3
-        sshd_admin_net:
-          - "0.0.0.0/0"
-        sshd_allow_groups:
-          - vagrant
-          - sudo
-        suid_sgid_permissions: false
+        sshd_host_keys_group: ssh_keys
         sshd_update_moduli: true
+      bookworm:
+        ansible_become_pass: vagrant
+        ansible_python_interpreter: /usr/bin/python3
+        disable_wireless: false
+        sshd_admin_net:
+          - "0.0.0.0/0"
+        sshd_allow_groups:
+          - vagrant
+          - sudo
+        sshd_update_moduli: true
+        system_upgrade: false
+      jammy:
+        disable_ipv6: true
+        block_blacklisted: true
+        disable_wireless: true
+        sshd_admin_net:
+          - "0.0.0.0/0"
+        sshd_allow_groups:
+          - vagrant
+          - sudo
+        suid_sgid_permissions: false
+        sshd_match_users:
+          - user: testuser01
+            rules:
+              - AllowUsers testuser01
+              - AuthenticationMethods password
+              - PasswordAuthentication yes
+          - user: testuser02
+            rules:
+              - AllowUsers testuser02
+              - Banner none
 platforms:
+  - name: almalinux9
+    image: docker.io/almalinux:9
+    privileged: true
+    volume_mounts:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
   - name: bookworm
-    box: debian/bookworm64
-    instance_raw_config_args:
-      - "vbguest.installer_options = { allow_kernel_upgrade: true }"
-    memory: 1024
-  - name: bullseye
-    box: debian/bullseye64
-    instance_raw_config_args:
-      - vbguest.auto_update = false
-    memory: 1024
-  - name: testing
-    box: debian/testing64
-    instance_raw_config_args:
-      - vbguest.auto_update = false
-    memory: 1024
+    image: docker.io/debian:bookworm
+    privileged: true
+    volume_mounts:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+  - name: jammy
+    image: docker.io/ubuntu:jammy
+    privileged: true
+    volume_mounts:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
 verifier:
   name: ansible
 scenario:
-  name: debian
+  name: podman
   create_sequence:
     - dependency
     - create
@@ -95,8 +105,6 @@ scenario:
     - create
     - prepare
     - converge
-    - idempotence
-    - side_effect
     - verify
     - cleanup
     - destroy
